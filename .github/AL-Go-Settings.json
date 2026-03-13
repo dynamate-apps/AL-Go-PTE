@@ -2,7 +2,8 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v8.2/.Modules/settings.schema.json",
   "type": "PTE",
   "templateUrl": "https://github.com/microsoft/AL-Go-PTE@main",
-  "versioningStrategy": 2,
+  "repoVersion": "28.0",
+  "versioningStrategy": 18,
   "enablePerTenantExtensionCop": true,
   "environments": [
     "BCBE-LIVE",

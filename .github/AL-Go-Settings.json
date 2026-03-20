@@ -5,6 +5,7 @@
   "repoVersion": "28.0",
   "versioningStrategy": 18,
   "enablePerTenantExtensionCop": true,
+  "cacheImageName": "",
   "environments": [
     "BCBE-LIVE",
     "BCBE-UAT"    

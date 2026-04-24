@@ -25,18 +25,17 @@ function Get-ParameterValue {
     return $DefaultValue
 }
 
-function Get-NAVServiceDLL  {
+function Get-NAVServiceDLL {
     Param(
         [Parameter(Mandatory = $true)]
         [string] $ServerInstance
     )  
     Remove-Module Microsoft.Dynamics.Nav.Management -Force -ErrorAction SilentlyContinue    
  
-    $path = ([string](Get-WmiObject win32_service | ?{$_.Name.ToString().ToUpper() -like "*NavServer*$ServerInstance*"} | select PathName).PathName).ToUpper()
-    $shortPath = $path.Substring(0,$path.IndexOf("EXE") + 3)
-    if ($shortPath.StartsWith('"'))
-    {
-        $shortPath = $shortPath.Remove(0,1)
+    $path = ([string](Get-WmiObject win32_service | ? { $_.Name.ToString().ToUpper() -like "*NavServer*$ServerInstance*" } | select PathName).PathName).ToUpper()
+    $shortPath = $path.Substring(0, $path.IndexOf("EXE") + 3)
+    if ($shortPath.StartsWith('"')) {
+        $shortPath = $shortPath.Remove(0, 1)
     }
  
     $PowerShellDLL = (Get-ChildItem -recurse -Path ((Get-ChildItem $ShortPath).Directory.FullName) "Microsoft.Dynamics.Nav.Management.DLL" | Sort-Object { ($_.FullName -split '\\').Count } | Select-Object -Last 1).FullName
@@ -47,25 +46,25 @@ function Get-NAVServiceDLL  {
 function Get-NAVAppMgtDLL {
     param([string] $ServerInstance)
     
-    Remove-Module Microsoft.Dynamics.Nav.Management -Force -ErrorAction SilentlyContinue    
+    Remove-Module Microsoft.Dynamics.Nav.Apps.Management -Force -ErrorAction SilentlyContinue    
+    Remove-Module Microsoft.BusinessCentral.Apps.Management.dll -Force -ErrorAction SilentlyContinue    
  
-    $path = ([string](Get-WmiObject win32_service | ?{$_.Name.ToString().ToUpper() -like "*NavServer*$ServerInstance*"} | select PathName).PathName).ToUpper()
-    $shortPath = $path.Substring(0,$path.IndexOf("EXE") + 3)
-    if ($shortPath.StartsWith('"'))
-    {
-        $shortPath = $shortPath.Remove(0,1)
+    $path = ([string](Get-WmiObject win32_service | ? { $_.Name.ToString().ToUpper() -like "*NavServer*$ServerInstance*" } | select PathName).PathName).ToUpper()
+    $shortPath = $path.Substring(0, $path.IndexOf("EXE") + 3)
+    if ($shortPath.StartsWith('"')) {
+        $shortPath = $shortPath.Remove(0, 1)
     }
  
     $PowerShellDLL = Get-ChildItem -Recurse -Path ((Get-ChildItem $ShortPath).Directory.FullName) "Microsoft.Dynamics.Nav.Apps.Management.DLL" |
-        Sort-Object { ($_.FullName -split '\\').Count } |
-        Select-Object -Last 1
-
+    Sort-Object { ($_.FullName -split '\\').Count } |
+    Select-Object -Last 1
+    
     if (-not $PowerShellDLL) {
         return $null
     }
-
+    
     $PowerShellDLL = $PowerShellDLL.FullName
-
+    
     return $PowerShellDLL    
 }
 

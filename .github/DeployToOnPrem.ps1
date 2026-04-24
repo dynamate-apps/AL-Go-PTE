@@ -25,22 +25,40 @@ function Get-ParameterValue {
     return $DefaultValue
 }
 
-function Get-NavAdminToolPath {
+function Get-NAVServiceDLL  {
     Param(
         [Parameter(Mandatory = $true)]
         [string] $ServerInstance
-    )
-    $path = ([string](Get-WmiObject win32_service | Where-Object {$_.Name.ToString().ToUpper() -like "*NavServer*$ServerInstance*"} | Select-Object PathName).PathName).ToUpper()
-
+    )  
+    Remove-Module Microsoft.Dynamics.Nav.Management -Force -ErrorAction SilentlyContinue    
+ 
+    $path = ([string](Get-WmiObject win32_service | ?{$_.Name.ToString().ToUpper() -like "*NavServer*$ServerInstance*"} | select PathName).PathName).ToUpper()
     $shortPath = $path.Substring(0,$path.IndexOf("EXE") + 3)
     if ($shortPath.StartsWith('"'))
     {
         $shortPath = $shortPath.Remove(0,1)
     }
  
-    $NavAdminTool = (Get-ChildItem -Path ((Get-ChildItem $ShortPath).Directory.FullName) "NavAdminTool.ps1").FullName
+    $PowerShellDLL = (Get-ChildItem -recurse -Path ((Get-ChildItem $ShortPath).Directory.FullName) "Microsoft.Dynamics.Nav.Management.DLL" | Sort-Object { ($_.FullName -split '\\').Count } | Select-Object -Last 1).FullName
             
-    return $NavAdminTool
+    return $PowerShellDLL  
+}
+
+function Get-NAVAppMgtDLL {
+    param([string] $ServerInstance)
+    
+    Remove-Module Microsoft.Dynamics.Nav.Management -Force -ErrorAction SilentlyContinue    
+ 
+    $path = ([string](Get-WmiObject win32_service | ?{$_.Name.ToString().ToUpper() -like "*NavServer*$ServerInstance*"} | select PathName).PathName).ToUpper()
+    $shortPath = $path.Substring(0,$path.IndexOf("EXE") + 3)
+    if ($shortPath.StartsWith('"'))
+    {
+        $shortPath = $shortPath.Remove(0,1)
+    }
+ 
+    $PowerShellDLL = (Get-ChildItem -recurse -Path ((Get-ChildItem $ShortPath).Directory.FullName) "Microsoft.Dynamics.Nav.Apps.Management.DLL" | Sort-Object { ($_.FullName -split '\\').Count } | Select-Object -Last 1).FullName
+            
+    return $PowerShellDLL    
 }
 
 function Resolve-AppList {
@@ -97,7 +115,7 @@ function Deploy-NavAppFile {
     $appVersion = $appInfo.Version
 
     $previousInstalledVersions = @(
-        Get-NAVAppInfo -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -ErrorAction SilentlyContinue
+        Get-NAVAppInfo -ServerInstance $ServerInstance -Name $appName -Publisher $appPublisher -ErrorAction SilentlyContinue
     )
     $hasPreviousInstalledVersion = ($previousInstalledVersions.Count -gt 0)
 
@@ -129,9 +147,13 @@ Write-Host "Environment Type: $($parameters.EnvironmentType)"
 Write-Host "Server Instance: $serverInstance"
 Write-Host "Tenant: $tenant"
 
-$navAdminToolPath = Get-NavAdminToolPath -ServerInstance $serverInstance
-Write-Host "Importing NavAdminTool from '$navAdminToolPath'"
-. $navAdminToolPath
+$managementDLL = Get-NAVServiceDLL -ServerInstance $serverInstance
+Write-Host "Importing management dll from '$managementDLL'"
+Import-Module $managementDLL
+
+$appManagementDLL = Get-NAVAppMgtDLL -ServerInstance $serverInstance
+Write-Host "Importing app dll from '$appManagementDLL'"
+Import-Module $appManagementDLL
 
 $tempPath = $null
 try {

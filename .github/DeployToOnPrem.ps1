@@ -56,8 +56,16 @@ function Get-NAVAppMgtDLL {
         $shortPath = $shortPath.Remove(0,1)
     }
  
-    $PowerShellDLL = (Get-ChildItem -recurse -Path ((Get-ChildItem $ShortPath).Directory.FullName) "Microsoft.Dynamics.Nav.Apps.Management.DLL" | Sort-Object { ($_.FullName -split '\\').Count } | Select-Object -Last 1).FullName
-            
+    $PowerShellDLL = Get-ChildItem -Recurse -Path ((Get-ChildItem $ShortPath).Directory.FullName) "Microsoft.Dynamics.Nav.Apps.Management.DLL" |
+        Sort-Object { ($_.FullName -split '\\').Count } |
+        Select-Object -Last 1
+
+    if (-not $PowerShellDLL) {
+        return $null
+    }
+
+    $PowerShellDLL = $PowerShellDLL.FullName
+
     return $PowerShellDLL    
 }
 
@@ -152,8 +160,13 @@ Write-Host "Importing management dll from '$managementDLL'"
 Import-Module $managementDLL
 
 $appManagementDLL = Get-NAVAppMgtDLL -ServerInstance $serverInstance
-Write-Host "Importing app dll from '$appManagementDLL'"
-Import-Module $appManagementDLL
+if ($appManagementDLL) {
+    Write-Host "Importing app dll from '$appManagementDLL'"
+    Import-Module $appManagementDLL
+}
+else {
+    Write-Host 'App management dll was not found. Continuing without importing Microsoft.Dynamics.Nav.Apps.Management.DLL.'
+}
 
 $tempPath = $null
 try {

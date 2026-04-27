@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.0/.Modules/settings.schema.json",
   "country": "w1",
-  "githubRunner": "DOCKER001,
+  "githubRunner": "DOCKER001",
   "appFolders": ["."],
   "testFolders": [],
   "bcptTestFolders": []

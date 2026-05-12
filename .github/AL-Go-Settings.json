@@ -7,27 +7,27 @@
   "cacheKeepDays": 9999,
   "enablePerTenantExtensionCop": true,
   "environments": [
-    "Production-BE",
-    "Accept-BE"    
+    "BCBE-LIVE",
+    "BCBE-UAT"    
   ],
   "DeployToBCBE-LIVE": {
     "EnvironmentType": "Cloud",
-    "EnvironmentName": "Production-BE",
+    "EnvironmentName": "BCBE-LIVE",
     "Scope": "PTE",
     "ContinuousDeployment": false,
     "runs-on": "DOCKER001",
     "Branches": [
-      "Production-BE"
+      "Production"
     ]
   },
     "DeployToBCBE-UAT": {
     "EnvironmentType": "Cloud",
-    "EnvironmentName": "Accept-BE",
+    "EnvironmentName": "BCBE-UAT",
     "Scope": "PTE",
     "ContinuousDeployment": false,
     "runs-on": "DOCKER001",
     "Branches": [
-      "Accept-BE"
+      "Accept"
     ]
   }
 }

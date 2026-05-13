@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.0/.Modules/settings.schema.json",
   "type": "PTE",
-  "templateUrl": "https://github.com/dynamate-apps//AL-Go-PTE@main",
+  "templateUrl": "https://github.com/dynamate-apps/AL-Go-PTE@main",
   "repoVersion": "27.0",
   "versioningStrategy": 18,
   "cacheKeepDays": 9999,

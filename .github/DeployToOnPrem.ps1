@@ -132,15 +132,15 @@ function Deploy-NavAppFile {
     Publish-NAVApp -ServerInstance $ServerInstance -Path $AppPath -SkipVerification
 
     Write-Host "Syncing $appName ($appVersion) with mode '$SyncMode'"
-    Sync-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Mode $SyncMode
+    Sync-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Mode $SyncMode -Force -Confirm:$false
 
     if ($hasPreviousInstalledVersion) {
         Write-Host "Starting data upgrade for $appName ($appVersion)"
-        Start-NAVAppDataUpgrade -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion
+        Start-NAVAppDataUpgrade -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Force -Confirm:$false
     }
     else {
         Write-Host "Installing $appName ($appVersion)"
-        Install-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion
+        Install-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Force -Confirm:$false
     }
 }
 

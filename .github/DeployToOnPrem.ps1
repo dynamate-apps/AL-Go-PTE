@@ -109,7 +109,9 @@ function Deploy-NavAppFile {
         [Parameter(Mandatory = $true)]
         [string] $ServerInstance,
         [Parameter(Mandatory = $true)]
-        [string] $Tenant
+        [string] $Tenant,
+        [Parameter(Mandatory = $false)]
+        [string] $SyncMode = 'Add'
     )
 
     $appInfo = Get-NAVAppInfo -Path $AppPath
@@ -129,8 +131,8 @@ function Deploy-NavAppFile {
     Write-Host "Publishing $appName ($appVersion)"
     Publish-NAVApp -ServerInstance $ServerInstance -Path $AppPath -SkipVerification
 
-    Write-Host "Syncing $appName ($appVersion)"
-    Sync-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion
+    Write-Host "Syncing $appName ($appVersion) with mode '$SyncMode'"
+    Sync-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Mode $SyncMode
 
     if ($hasPreviousInstalledVersion) {
         Write-Host "Starting data upgrade for $appName ($appVersion)"
@@ -174,8 +176,10 @@ try {
     Write-Host "Apps to deploy:"
     $appFiles | ForEach-Object { Write-Host "- $([System.IO.Path]::GetFileName($_))" }
 
+    $syncMode = Get-ParameterValue -InputObject $parameters -Names @('SyncMode') -DefaultValue 'Add'
+
     foreach ($appFile in $appFiles) {
-        Deploy-NavAppFile -AppPath $appFile -ServerInstance $serverInstance -Tenant $tenant
+        Deploy-NavAppFile -AppPath $appFile -ServerInstance $serverInstance -Tenant $tenant -SyncMode $syncMode
     }
 }
 finally {

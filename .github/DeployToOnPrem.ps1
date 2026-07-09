@@ -123,24 +123,34 @@ function Deploy-NavAppFile {
     $appPublisher = $appInfo.Publisher
     $appVersion = $appInfo.Version
 
-    $previousInstalledVersions = @(
-        Get-NAVAppInfo -ServerInstance $ServerInstance -Name $appName -Publisher $appPublisher -ErrorAction SilentlyContinue
-    )
-    $hasPreviousInstalledVersion = ($previousInstalledVersions.Count -gt 0)
+    # CI/CD must run fully non-interactive, including ForceSync operations.
+    $previousConfirmPreference = $ConfirmPreference
+    $ConfirmPreference = 'None'
 
-    Write-Host "Publishing $appName ($appVersion)"
-    Publish-NAVApp -ServerInstance $ServerInstance -Path $AppPath -SkipVerification
+    try {
 
-    Write-Host "Syncing $appName ($appVersion) with mode '$SyncMode'"
-    Sync-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Mode $SyncMode -Force -Confirm:$false
+        $previousInstalledVersions = @(
+            Get-NAVAppInfo -ServerInstance $ServerInstance -Name $appName -Publisher $appPublisher -ErrorAction SilentlyContinue
+        )
+        $hasPreviousInstalledVersion = ($previousInstalledVersions.Count -gt 0)
 
-    if ($hasPreviousInstalledVersion) {
-        Write-Host "Starting data upgrade for $appName ($appVersion)"
-        Start-NAVAppDataUpgrade -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Force -Confirm:$false
+        Write-Host "Publishing $appName ($appVersion)"
+        Publish-NAVApp -ServerInstance $ServerInstance -Path $AppPath -SkipVerification
+
+        Write-Host "Syncing $appName ($appVersion) with mode '$SyncMode'"
+        Sync-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Mode $SyncMode -Force
+
+        if ($hasPreviousInstalledVersion) {
+            Write-Host "Starting data upgrade for $appName ($appVersion)"
+            Start-NAVAppDataUpgrade -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Force
+        }
+        else {
+            Write-Host "Installing $appName ($appVersion)"
+            Install-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Force
+        }
     }
-    else {
-        Write-Host "Installing $appName ($appVersion)"
-        Install-NAVApp -ServerInstance $ServerInstance -Tenant $Tenant -Name $appName -Publisher $appPublisher -Version $appVersion -Force -Confirm:$false
+    finally {
+        $ConfirmPreference = $previousConfirmPreference
     }
 }
 

@@ -208,13 +208,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Determine Build Mode
+        id: buildMode
+        shell: pwsh
+        run: |
+          $buildMode = ('${{ needs.Initialization.outputs.environmentsMatrixJson }}' | ConvertFrom-Json).matrix.include |
+              Select-Object -First 1 -ExpandProperty buildMode
+          Write-Host "Resolved buildMode: $buildMode"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "buildMode=$buildMode"
+
       - name: Get Artifacts for deployment
         uses: microsoft/AL-Go-Actions/GetArtifactsForDeployment@v9.0
         with:
           shell: powershell
           artifactsVersion: ${{ github.event.inputs.appVersion }}
           artifactsFolder: '.artifacts'
-          buildMode: Default
+          buildMode: ${{ steps.buildMode.outputs.buildMode }}
 
       - name: Tag deployments and post changelog
         env:
@@ -224,7 +233,7 @@ jobs:
           $errorActionPreference = "Stop"
 
           $version = Get-ChildItem '.artifacts' -Directory |
-              ForEach-Object { if ($_.Name -match '-Apps-(\d+\.\d+\.\d+\.\d+)') { $Matches[1] } } |
+              ForEach-Object { if ($_.Name -match 'Apps-(\d+\.\d+\.\d+\.\d+)$') { $Matches[1] } } |
               Select-Object -First 1
 
           if (-not $version) {

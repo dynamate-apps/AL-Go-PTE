@@ -1,0 +1,23 @@
+name: Teamwork Production Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [Production]
+
+permissions:
+  contents: read
+
+jobs:
+  notify-teamwork:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment on linked Teamwork tasks
+        uses: Teamwork/github-sync@9778e6e09b34abaca4f107d2cbd43a9f72337de0
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          TEAMWORK_URI: ${{ secrets.TEAMWORK_URI }}
+          TEAMWORK_API_TOKEN: ${{ secrets.TEAMWORK_API_TOKEN }}
+          LIGHTWEIGHT_COMMENT: 'true'
+          AUTOMATIC_TAGGING: 'false'

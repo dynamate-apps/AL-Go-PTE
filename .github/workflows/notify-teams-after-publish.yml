@@ -40,6 +40,14 @@ jobs:
 
             const commitSha = workflowRun.data.head_sha;
 
+            const appFile = await github.rest.repos.getContent({
+              owner,
+              repo,
+              path: 'App.json',
+              ref: commitSha
+            });
+            const appName = JSON.parse(Buffer.from(appFile.data.content, 'base64').toString()).name;
+
             // Find tags that point to this commit
             const deploymentTags = [];
             for (const ref of allRefs) {
@@ -82,6 +90,7 @@ jobs:
             core.setOutput("deployments", JSON.stringify(currentDeployments));
             core.setOutput("version", currentDeployments[0].version);
             core.setOutput("commit_sha", commitSha);
+            core.setOutput("app_name", appName);
 
       - name: Get deployed environments
         id: envs
@@ -177,6 +186,7 @@ jobs:
           CHANGELOGS: ${{ steps.changelog.outputs.changelogs }}
           ENVIRONMENTS: ${{ steps.envs.outputs.environments }}
           APP_VERSION: ${{ steps.deployment.outputs.version }}
+          APP_NAME: ${{ steps.deployment.outputs.app_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
         run: |
           # Create Adaptive Card payload using python
@@ -197,6 +207,10 @@ jobs:
             {
               "type": "FactSet",
               "facts": [
+                {
+                  "title": "App:",
+                  "value": os.environ['APP_NAME']
+                },
                 {
                   "title": "App Version:",
                   "value": os.environ['APP_VERSION']

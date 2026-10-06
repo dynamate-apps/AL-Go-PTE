@@ -40,13 +40,19 @@ jobs:
 
             const commitSha = workflowRun.data.head_sha;
 
-            const appFile = await github.rest.repos.getContent({
-              owner,
-              repo,
-              path: 'App.json',
-              ref: commitSha
-            });
-            const appName = JSON.parse(Buffer.from(appFile.data.content, 'base64').toString()).name;
+            // Locate app.json case-insensitively (repos use App.json or app.json, possibly in a subfolder); prefer the shallowest
+            const tree = await github.rest.git.getTree({ owner, repo, tree_sha: commitSha, recursive: 'true' });
+            const appPath = tree.data.tree
+              .map(t => t.path)
+              .filter(p => /(^|\/)app\.json$/i.test(p))
+              .sort((a, b) => a.split('/').length - b.split('/').length)[0];
+            let appName = repo;
+            if (appPath) {
+              const appFile = await github.rest.repos.getContent({ owner, repo, path: appPath, ref: commitSha });
+              appName = JSON.parse(Buffer.from(appFile.data.content, 'base64').toString()).name;
+            } else {
+              console.log(`No app.json found at ${commitSha}, falling back to repo name`);
+            }
 
             // Find tags that point to this commit
             const deploymentTags = [];

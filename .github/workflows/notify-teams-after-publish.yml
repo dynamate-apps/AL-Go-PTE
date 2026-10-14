@@ -8,10 +8,13 @@ on:
 permissions:
   contents: read
   actions: read
+  checks: read
+  deployments: read
 
 jobs:
   notify:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Also notify on failure: a partially failed run still deployed to some environments
+    if: ${{ github.event.workflow_run.conclusion != 'cancelled' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -92,7 +95,34 @@ jobs:
               return;
             }
 
+            // Environments whose Deploy matrix leg did not succeed, with link to the job and its error
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { owner, repo, run_id: runId });
+            const failedEnvs = [];
+            for (const j of jobs.filter(j => j.name.startsWith('Deploy to ') && j.conclusion !== 'success')) {
+              let error = `Job ${j.conclusion}`;
+              try {
+                const annotations = (await github.rest.checks.listAnnotations({ owner, repo, check_run_id: j.id })).data
+                  .filter(a => a.annotation_level === 'failure');
+                // Prefer the real error over the generic "Process completed with exit code 1."
+                const best = annotations.find(a => !/^Process completed with exit code/.test(a.message)) || annotations[0];
+                if (best) error = best.message.length > 300 ? best.message.slice(0, 300) + '…' : best.message;
+              } catch (e) {
+                console.log(`Could not read annotations for ${j.name}: ${e.message}`);
+              }
+              failedEnvs.push({ environment: j.name.slice('Deploy to '.length).split(' ')[0], url: j.html_url, error });
+            }
+
+            // Business Central URL per environment, from the GitHub deployment created by the Deploy job
+            const ghDeployments = await github.rest.repos.listDeployments({ owner, repo, sha: commitSha, per_page: 100 });
+            for (const cd of currentDeployments) {
+              const d = ghDeployments.data.find(d => d.environment.split(' ')[0] === cd.environment); // newest first
+              if (!d) continue;
+              const statuses = await github.rest.repos.listDeploymentStatuses({ owner, repo, deployment_id: d.id, per_page: 1 });
+              cd.environmentUrl = statuses.data[0]?.environment_url || '';
+            }
+
             // Store deployment information for later steps
+            core.setOutput("failed_environments", JSON.stringify(failedEnvs));
             core.setOutput("deployments", JSON.stringify(currentDeployments));
             core.setOutput("version", currentDeployments[0].version);
             core.setOutput("commit_sha", commitSha);
@@ -180,7 +210,8 @@ jobs:
                 version: version,
                 previousVersion: previousTag.replace(`deployed/${envName}/`, ''),
                 commits: commits,
-                compareUrl: compareUrl
+                compareUrl: compareUrl,
+                environmentUrl: deployment.environmentUrl || ''
               });
             }
             
@@ -191,24 +222,41 @@ jobs:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           CHANGELOGS: ${{ steps.changelog.outputs.changelogs }}
           ENVIRONMENTS: ${{ steps.envs.outputs.environments }}
+          FAILED_ENVIRONMENTS: ${{ steps.deployment.outputs.failed_environments }}
           APP_VERSION: ${{ steps.deployment.outputs.version }}
           APP_NAME: ${{ steps.deployment.outputs.app_name }}
+          RELEASED_BY: ${{ github.event.workflow_run.triggering_actor.login }}
+          RELEASED_BY_URL: ${{ github.event.workflow_run.triggering_actor.html_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
         run: |
           # Create Adaptive Card payload using python
           python3 - << 'PY' > /tmp/teams-payload.json
-          import json, os
+          import json, os, re
+
+          repo_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+
+          # Split a commit message into TextRuns, turning #123 into a link to PR 123
+          def msg_runs(text):
+            runs = []
+            for i, part in enumerate(re.split(r'(?<![\w/])#(\d+)\b', text)):
+              if i % 2:
+                runs.append({"type": "TextRun", "text": f"#{part}", "color": "Accent",
+                             "selectAction": {"type": "Action.OpenUrl", "url": f"{repo_url}/pull/{part}"}})
+              elif part:
+                runs.append({"type": "TextRun", "text": part, "isSubtle": True})
+            return runs
           
           changelogs = json.loads(os.environ['CHANGELOGS'])
-          
+          failed_envs = json.loads(os.environ.get('FAILED_ENVIRONMENTS') or '[]')
+
           # Build body sections for each environment
           body_sections = [
             {
               "type": "TextBlock",
-              "text": "✅ Deployment Completed",
+              "text": "⚠️ Deployment Partially Failed" if failed_envs else "✅ Deployment Completed",
               "weight": "Bolder",
               "size": "Large",
-              "color": "Good"
+              "color": "Warning" if failed_envs else "Good"
             },
             {
               "type": "FactSet",
@@ -226,13 +274,45 @@ jobs:
                   "value": os.environ['ENVIRONMENTS']
                 },
                 {
+                  "title": "Released by:",
+                  "value": f"[{os.environ['RELEASED_BY']}]({os.environ['RELEASED_BY_URL']})"
+                },
+                {
                   "title": "Workflow run:",
                   "value": f"[View workflow]({os.environ['RUN_URL']})"
                 }
               ]
             }
           ]
-          
+          if failed_envs:
+            body_sections[1]["facts"].insert(3, {"title": "Failed Environments:",
+                                                 "value": ", ".join(f["environment"] for f in failed_envs)})
+
+          # One block per failed environment: error message + link to the failing job
+          for failed in failed_envs:
+            body_sections += [
+              {
+                "type": "TextBlock",
+                "text": f"❌ Environment: {failed['environment']} (failed)",
+                "weight": "Bolder",
+                "size": "Medium",
+                "color": "Attention",
+                "separator": True
+              },
+              {
+                "type": "TextBlock",
+                "text": failed['error'],
+                "wrap": True,
+                "isSubtle": True,
+                "spacing": "Small"
+              },
+              {
+                "type": "TextBlock",
+                "text": f"[View failing job]({failed['url']})",
+                "spacing": "Small"
+              }
+            ]
+
           # Add details for each environment
           for changelog in changelogs:
             env_name = changelog['environment']
@@ -264,7 +344,14 @@ jobs:
                 }
               ]
             })
-            
+
+            if changelog.get('environmentUrl'):
+              body_sections.append({
+                "type": "ActionSet",
+                "actions": [{"type": "Action.OpenUrl", "title": "Open in Business Central",
+                             "url": changelog['environmentUrl']}]
+              })
+
             # Add commits header
             body_sections.append({
               "type": "TextBlock",
@@ -283,10 +370,9 @@ jobs:
                   {"type": "TextRun", "text": commit['sha'],
                    "selectAction": {"type": "Action.OpenUrl", "url": commit['url']},
                    "color": "Accent", "isSubtle": False},
-                  {"type": "TextRun", "text": f"  {clean_msg}", "isSubtle": True}
-                ]
+                ] + msg_runs(f"  {clean_msg}")
               else:
-                inlines = [{"type": "TextRun", "text": clean_msg, "isSubtle": True}]
+                inlines = msg_runs(clean_msg)
               body_sections.append({
                 "type": "RichTextBlock",
                 "inlines": inlines,

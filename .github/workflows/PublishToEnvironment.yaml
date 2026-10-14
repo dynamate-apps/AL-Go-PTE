@@ -199,7 +199,7 @@ jobs:
   CustomJobTagDeployment:
     name: Tag deployment and post changelog
     needs: [ Initialization, Deploy ]
-    if: (!cancelled()) && (needs.Deploy.result == 'success')
+    if: (!cancelled()) && (needs.Deploy.result != 'skipped')
     runs-on: [ windows-latest ]
     permissions:
       contents: write
@@ -241,8 +241,15 @@ jobs:
               exit 0
           }
 
-          $environments = ('${{ needs.Initialization.outputs.environmentsMatrixJson }}' | ConvertFrom-Json).matrix.include |
-              ForEach-Object { $_.environment.Split(' ')[0] }
+          # Only tag environments whose Deploy matrix leg succeeded (others may have failed)
+          $environments = @(gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/jobs?per_page=100" --paginate `
+                  --jq '.jobs[] | select((.name | startswith("Deploy to ")) and .conclusion == "success") | .name' |
+              ForEach-Object { $_.Substring('Deploy to '.Length).Split(' ')[0] })
+
+          if (-not $environments) {
+              Write-Host "::warning::No successful deployments — skipping deployment tags."
+              exit 0
+          }
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

@@ -1,9 +1,9 @@
 name: Notify Teams After Publish
 
+# Called as a job from PublishToEnvironment.yaml (CustomJobNotifyTeams), so it runs in the same
+# workflow run, also when some environments failed
 on:
-  workflow_run:
-    workflows: ["Publish To Environment"]
-    types: [completed]
+  workflow_call:
 
 permissions:
   contents: read
@@ -13,8 +13,6 @@ permissions:
 
 jobs:
   notify:
-    # Also notify on failure: a partially failed run still deployed to some environments
-    if: ${{ github.event.workflow_run.conclusion != 'cancelled' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -25,7 +23,7 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const runId = context.payload.workflow_run.id;
+            const runId = context.runId;
 
             // Get all tags from the repository
             const allRefs = await github.paginate(github.rest.git.listMatchingRefs, {
@@ -225,9 +223,9 @@ jobs:
           FAILED_ENVIRONMENTS: ${{ steps.deployment.outputs.failed_environments }}
           APP_VERSION: ${{ steps.deployment.outputs.version }}
           APP_NAME: ${{ steps.deployment.outputs.app_name }}
-          RELEASED_BY: ${{ github.event.workflow_run.triggering_actor.login }}
-          RELEASED_BY_URL: ${{ github.event.workflow_run.triggering_actor.html_url }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+          RELEASED_BY: ${{ github.triggering_actor }}
+          RELEASED_BY_URL: ${{ github.server_url }}/${{ github.triggering_actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Create Adaptive Card payload using python
           python3 - << 'PY' > /tmp/teams-payload.json

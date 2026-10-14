@@ -307,6 +307,18 @@ jobs:
               Write-Host $summary
           }
 
+  CustomJobNotifyTeams:
+    name: Notify Teams
+    needs: [ Deploy, CustomJobTagDeployment ]
+    if: (!cancelled()) && (needs.Deploy.result != 'skipped')
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      deployments: read
+    uses: ./.github/workflows/notify-teams-after-publish.yml
+    secrets: inherit
+
   PostProcess:
     needs: [ Initialization, Deploy, CustomJobTagDeployment ]
     if: always()

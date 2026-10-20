@@ -4,6 +4,11 @@ name: Notify Teams After Publish
 # workflow run, also when some environments failed
 on:
   workflow_call:
+    inputs:
+      deployments:
+        description: JSON array from the tag job (environment, version, tag, previousVersion, compareUrl, commitCount, commits)
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -16,30 +21,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Find deployment tags created by workflow
+      - name: Collect deployment info
         id: deployment
         uses: actions/github-script@v7
+        env:
+          DEPLOYMENTS: ${{ inputs.deployments }}
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const runId = context.runId;
+            const commitSha = context.sha;
 
-            // Get all tags from the repository
-            const allRefs = await github.paginate(github.rest.git.listMatchingRefs, {
-              owner,
-              repo,
-              ref: 'tags/deployed/'
-            });
-
-            // Get the workflow run to find the commit SHA
-            const workflowRun = await github.rest.actions.getWorkflowRun({
-              owner,
-              repo,
-              run_id: runId
-            });
-
-            const commitSha = workflowRun.data.head_sha;
+            // Deployments (environment, version, tag, changelog) are produced by the tag job
+            const deployments = JSON.parse(process.env.DEPLOYMENTS || '[]');
+            if (deployments.length === 0) {
+              core.setFailed("The tag job reported no deployments. The deployment may not have completed successfully.");
+              return;
+            }
 
             // Locate app.json case-insensitively (repos use App.json or app.json, possibly in a subfolder); prefer the shallowest
             const tree = await github.rest.git.getTree({ owner, repo, tree_sha: commitSha, recursive: 'true' });
@@ -55,48 +54,12 @@ jobs:
               console.log(`No app.json found at ${commitSha}, falling back to repo name`);
             }
 
-            // Find tags that point to this commit
-            const deploymentTags = [];
-            for (const ref of allRefs) {
-              const tagName = ref.ref.replace('refs/tags/', '');
-              
-              // Get the tag object to find what it points to
-              try {
-                const tag = await github.rest.git.getRef({
-                  owner,
-                  repo,
-                  ref: `tags/${tagName}`
-                });
-                
-                // Check if this tag was created in this workflow run by checking the commit
-                // Tag format: deployed/{environment}/{version}
-                const match = tagName.match(/^deployed\/([^\/]+)\/(.+)$/);
-                if (match) {
-                  const [, envName, version] = match;
-                  deploymentTags.push({ 
-                    tag: tagName, 
-                    environment: envName, 
-                    version: version,
-                    sha: tag.data.object.sha
-                  });
-                }
-              } catch (error) {
-                console.log(`Error checking tag ${tagName}: ${error.message}`);
-              }
-            }
-
-            // Filter to tags that match our commit (likely created in this run)
-            const currentDeployments = deploymentTags.filter(dt => dt.sha === commitSha);
-
-            if (currentDeployments.length === 0) {
-              core.setFailed("No deployment tags found for this workflow run. The deployment may not have completed successfully.");
-              return;
-            }
-
             // Environments whose Deploy matrix leg did not succeed, with link to the job and its error
+            // Environments the tag job reported as deployed are never failed, whatever the jobs API shows
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { owner, repo, run_id: runId });
+            const envOf = j => j.name.slice('Deploy to '.length).split(' ')[0];
             const failedEnvs = [];
-            for (const j of jobs.filter(j => j.name.startsWith('Deploy to ') && j.conclusion !== 'success')) {
+            for (const j of jobs.filter(j => j.name.startsWith('Deploy to ') && j.conclusion !== 'success' && !deployments.some(d => d.environment === envOf(j)))) {
               let error = `Job ${j.conclusion}`;
               try {
                 const annotations = (await github.rest.checks.listAnnotations({ owner, repo, check_run_id: j.id })).data
@@ -107,119 +70,27 @@ jobs:
               } catch (e) {
                 console.log(`Could not read annotations for ${j.name}: ${e.message}`);
               }
-              failedEnvs.push({ environment: j.name.slice('Deploy to '.length).split(' ')[0], url: j.html_url, error });
+              failedEnvs.push({ environment: envOf(j), url: j.html_url, error });
             }
 
             // Business Central URL per environment, from the GitHub deployment created by the Deploy job
             const ghDeployments = await github.rest.repos.listDeployments({ owner, repo, sha: commitSha, per_page: 100 });
-            for (const cd of currentDeployments) {
-              const d = ghDeployments.data.find(d => d.environment.split(' ')[0] === cd.environment); // newest first
+            for (const dep of deployments) {
+              const d = ghDeployments.data.find(d => d.environment.split(' ')[0] === dep.environment); // newest first
               if (!d) continue;
               const statuses = await github.rest.repos.listDeploymentStatuses({ owner, repo, deployment_id: d.id, per_page: 1 });
-              cd.environmentUrl = statuses.data[0]?.environment_url || '';
+              dep.environmentUrl = statuses.data[0]?.environment_url || '';
             }
 
-            // Store deployment information for later steps
             core.setOutput("failed_environments", JSON.stringify(failedEnvs));
-            core.setOutput("deployments", JSON.stringify(currentDeployments));
-            core.setOutput("version", currentDeployments[0].version);
-            core.setOutput("commit_sha", commitSha);
+            core.setOutput("deployments", JSON.stringify(deployments));
+            core.setOutput("version", deployments[0].version);
             core.setOutput("app_name", appName);
-
-      - name: Get deployed environments
-        id: envs
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const deployments = JSON.parse('${{ steps.deployment.outputs.deployments }}');
-            const environments = deployments.map(d => d.environment).join(", ");
-            core.setOutput("environments", environments);
-
-      - name: Build changelog for each environment
-        id: changelog
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const deployments = JSON.parse('${{ steps.deployment.outputs.deployments }}');
-            
-            const changelogs = [];
-            
-            for (const deployment of deployments) {
-              const currentTag = deployment.tag;
-              const envName = deployment.environment;
-              const version = deployment.version;
-              
-              console.log(`Building changelog for ${envName} - version ${version}`);
-              
-              // Find the previous deployment tag for this environment
-              let previousTag = null;
-              let commits = [];
-              let compareUrl = "";
-              
-              try {
-                // Get all tags for this environment
-                const envTags = await github.paginate(github.rest.git.listMatchingRefs, {
-                  owner,
-                  repo,
-                  ref: `tags/deployed/${envName}/`
-                });
-                
-                // Sort by tag name (versions) and find the one before current
-                const sortedTags = envTags
-                  .map(t => t.ref.replace('refs/tags/', ''))
-                  .filter(t => t !== currentTag)
-                  .sort()
-                  .reverse();
-                
-                if (sortedTags.length > 0) {
-                  previousTag = sortedTags[0];
-                  
-                  // Get the comparison between tags
-                  const comparison = await github.rest.repos.compareCommits({
-                    owner,
-                    repo,
-                    base: previousTag,
-                    head: currentTag
-                  });
-                  
-                  commits = comparison.data.commits.map(c => ({
-                    sha: c.sha.substring(0, 7),
-                    url: `https://github.com/${owner}/${repo}/commit/${c.sha}`,
-                    message: c.commit.message.split(/\r?\n/)[0].trim()
-                  }));
-                  
-                  compareUrl = `https://github.com/${owner}/${repo}/compare/${previousTag}...${currentTag}`;
-                } else {
-                  // First deployment
-                  previousTag = "First deployment";
-                  compareUrl = `https://github.com/${owner}/${repo}/commits/${currentTag}`;
-                  commits = [{ sha: "", url: "", message: "Initial deployment - no previous version to compare" }];
-                }
-                
-              } catch (error) {
-                console.log(`Error building changelog for ${envName}: ${error.message}`);
-                commits = [{ sha: "", message: "Error retrieving commit history" }];
-              }
-              
-              changelogs.push({
-                environment: envName,
-                version: version,
-                previousVersion: previousTag.replace(`deployed/${envName}/`, ''),
-                commits: commits,
-                compareUrl: compareUrl,
-                environmentUrl: deployment.environmentUrl || ''
-              });
-            }
-            
-            core.setOutput("changelogs", JSON.stringify(changelogs));
 
       - name: Post changelog to Teams
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-          CHANGELOGS: ${{ steps.changelog.outputs.changelogs }}
-          ENVIRONMENTS: ${{ steps.envs.outputs.environments }}
+          DEPLOYMENTS: ${{ steps.deployment.outputs.deployments }}
           FAILED_ENVIRONMENTS: ${{ steps.deployment.outputs.failed_environments }}
           APP_VERSION: ${{ steps.deployment.outputs.version }}
           APP_NAME: ${{ steps.deployment.outputs.app_name }}
@@ -244,7 +115,7 @@ jobs:
                 runs.append({"type": "TextRun", "text": part, "isSubtle": True})
             return runs
           
-          changelogs = json.loads(os.environ['CHANGELOGS'])
+          changelogs = json.loads(os.environ['DEPLOYMENTS'])
           failed_envs = json.loads(os.environ.get('FAILED_ENVIRONMENTS') or '[]')
 
           # Build body sections for each environment
@@ -269,7 +140,7 @@ jobs:
                 },
                 {
                   "title": "Environments:",
-                  "value": os.environ['ENVIRONMENTS']
+                  "value": ", ".join(c['environment'] for c in changelogs)
                 },
                 {
                   "title": "Released by:",
@@ -363,10 +234,10 @@ jobs:
             shown_commits = commits[:10]  # Limit to 10 to avoid payload size issues
             for commit in shown_commits:
               clean_msg = commit.get('message', '').replace('\n', ' ').replace('\r', '').strip()
-              if commit.get('sha') and commit.get('url'):
+              if commit.get('sha'):
                 inlines = [
-                  {"type": "TextRun", "text": commit['sha'],
-                   "selectAction": {"type": "Action.OpenUrl", "url": commit['url']},
+                  {"type": "TextRun", "text": commit['sha'][:7],
+                   "selectAction": {"type": "Action.OpenUrl", "url": f"{repo_url}/commit/{commit['sha']}"},
                    "color": "Accent", "isSubtle": False},
                 ] + msg_runs(f"  {clean_msg}")
               else:
@@ -377,10 +248,10 @@ jobs:
                 "spacing": "Small"
               })
 
-            if len(commits) > 10:
+            if changelog['commitCount'] > 10:
               body_sections.append({
                 "type": "TextBlock",
-                "text": f"... and {len(commits) - 10} more commits",
+                "text": f"... and {changelog['commitCount'] - 10} more commits",
                 "wrap": True,
                 "isSubtle": True,
                 "spacing": "Small"
@@ -389,7 +260,7 @@ jobs:
             if not shown_commits:
               body_sections.append({
                 "type": "TextBlock",
-                "text": "No commits found",
+                "text": "Initial deployment - no previous version to compare" if prev_version == "First deployment" else "No commits found",
                 "wrap": True,
                 "isSubtle": True,
                 "spacing": "Small"

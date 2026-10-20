@@ -291,6 +291,13 @@ jobs:
           echo "Content-Type: application/json"
           echo "::endgroup::"
 
+          # Teams limits a message to 28 KB; the card builder aims for 24 KB
+          PAYLOAD_BYTES=$(wc -c < /tmp/teams-payload.json)
+          echo "Payload size: ${PAYLOAD_BYTES} bytes"
+          if [ "$PAYLOAD_BYTES" -gt 28000 ]; then
+            echo "::warning::Teams card is ${PAYLOAD_BYTES} bytes, over the 28 KB Teams message limit; Teams may drop it"
+          fi
+
           echo "::group::JSON Payload"
           cat /tmp/teams-payload.json
           echo ""

@@ -182,47 +182,46 @@ jobs:
               }
             ]
 
-          # Add details for each environment
+          # Environments with the same version, previous version and commits share one block,
+          # so a deployment to many environments stays well below the Teams message size limit (~28 KB)
+          groups = {}
           for changelog in changelogs:
-            env_name = changelog['environment']
-            version = changelog['version']
-            prev_version = changelog['previousVersion']
-            commits = changelog['commits']
-            compare_url = changelog['compareUrl']
-            
-            # Add separator and environment header
-            body_sections.append({
-              "type": "TextBlock",
-              "text": f"Environment: {env_name}",
-              "weight": "Bolder",
-              "size": "Medium",
-              "separator": True
-            })
-            
-            # Add version info
-            body_sections.append({
-              "type": "FactSet",
-              "facts": [
-                {
-                  "title": "Current Version:",
-                  "value": version
-                },
-                {
-                  "title": "Previous Version:",
-                  "value": prev_version
-                }
-              ]
-            })
+            key = (changelog['version'], changelog['previousVersion'], changelog['commitCount'],
+                   tuple(c['sha'] for c in changelog['commits']))
+            groups.setdefault(key, []).append(changelog)
 
-            if changelog.get('environmentUrl'):
-              body_sections.append({
-                "type": "ActionSet",
-                "actions": [{"type": "Action.OpenUrl", "title": "Open in Business Central",
-                             "url": changelog['environmentUrl']}]
+          def group_blocks(group, max_commits):
+            first = group[0]
+            prev_version = first['previousVersion']
+            env_names = ", ".join(c['environment'] for c in group)
+            blocks = [
+              {
+                "type": "TextBlock",
+                "text": f"{'Environments' if len(group) > 1 else 'Environment'}: {env_names}",
+                "weight": "Bolder",
+                "size": "Medium",
+                "wrap": True,
+                "separator": True
+              },
+              {
+                "type": "FactSet",
+                "facts": [
+                  {"title": "Current Version:", "value": first['version']},
+                  {"title": "Previous Version:", "value": prev_version}
+                ]
+              }
+            ]
+
+            links = [f"[{c['environment']}]({c['environmentUrl']})" for c in group if c.get('environmentUrl')]
+            if links:
+              blocks.append({
+                "type": "TextBlock",
+                "text": "Open in Business Central: " + " · ".join(links),
+                "wrap": True,
+                "spacing": "Small"
               })
 
-            # Add commits header
-            body_sections.append({
+            blocks.append({
               "type": "TextBlock",
               "text": "Commits:",
               "weight": "Bolder",
@@ -230,63 +229,59 @@ jobs:
               "size": "Small"
             })
 
-            # Add commits — one RichTextBlock per commit for proper inline link rendering
-            shown_commits = commits[:10]  # Limit to 10 to avoid payload size issues
+            # One RichTextBlock per commit for proper inline link rendering
+            shown_commits = first['commits'][:max_commits]
             for commit in shown_commits:
               clean_msg = commit.get('message', '').replace('\n', ' ').replace('\r', '').strip()
-              if commit.get('sha'):
-                inlines = [
-                  {"type": "TextRun", "text": commit['sha'][:7],
-                   "selectAction": {"type": "Action.OpenUrl", "url": f"{repo_url}/commit/{commit['sha']}"},
-                   "color": "Accent", "isSubtle": False},
-                ] + msg_runs(f"  {clean_msg}")
-              else:
-                inlines = msg_runs(clean_msg)
-              body_sections.append({
-                "type": "RichTextBlock",
-                "inlines": inlines,
-                "spacing": "Small"
-              })
+              inlines = [
+                {"type": "TextRun", "text": commit['sha'][:7],
+                 "selectAction": {"type": "Action.OpenUrl", "url": f"{repo_url}/commit/{commit['sha']}"},
+                 "color": "Accent", "isSubtle": False},
+              ] + msg_runs(f"  {clean_msg}")
+              blocks.append({"type": "RichTextBlock", "inlines": inlines, "spacing": "Small"})
 
-            if changelog['commitCount'] > 10:
-              body_sections.append({
-                "type": "TextBlock",
-                "text": f"... and {changelog['commitCount'] - 10} more commits",
-                "wrap": True,
-                "isSubtle": True,
-                "spacing": "Small"
-              })
+            more = first['commitCount'] - len(shown_commits)
+            if more > 0:
+              text = f"... and {more} more commits"
+            elif first['commitCount'] == 0:
+              text = "Initial deployment - no previous version to compare" if prev_version == "First deployment" else "No commits found"
+            else:
+              text = None
+            if text:
+              blocks.append({"type": "TextBlock", "text": text, "wrap": True, "isSubtle": True, "spacing": "Small"})
+            return blocks
 
-            if not shown_commits:
-              body_sections.append({
-                "type": "TextBlock",
-                "text": "Initial deployment - no previous version to compare" if prev_version == "First deployment" else "No commits found",
-                "wrap": True,
-                "isSubtle": True,
-                "spacing": "Small"
-              })
-          
-          payload = {
-            "type": "message",
-            "attachments": [
-              {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": {
-                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                  "type": "AdaptiveCard",
-                  "version": "1.4",
-                  "body": body_sections,
-                  "actions": [
-                    {
-                      "type": "Action.OpenUrl",
-                      "title": "View Workflow Run",
-                      "url": os.environ['RUN_URL']
-                    }
-                  ]
+          def build_payload(max_commits):
+            body = list(body_sections)
+            for group in groups.values():
+              body += group_blocks(group, max_commits)
+            return {
+              "type": "message",
+              "attachments": [
+                {
+                  "contentType": "application/vnd.microsoft.card.adaptive",
+                  "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": body,
+                    "actions": [
+                      {
+                        "type": "Action.OpenUrl",
+                        "title": "View Workflow Run",
+                        "url": os.environ['RUN_URL']
+                      }
+                    ]
+                  }
                 }
-              }
-            ]
-          }
+              ]
+            }
+
+          # Teams accepts the webhook (HTTP 202) but silently drops oversized cards: shrink the commit lists until it fits
+          for max_commits in (10, 3, 0):
+            payload = build_payload(max_commits)
+            if len(json.dumps(payload).encode()) <= 24000:
+              break
           print(json.dumps(payload))
           PY
 

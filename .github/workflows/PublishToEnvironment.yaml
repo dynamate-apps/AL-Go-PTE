@@ -289,8 +289,8 @@ jobs:
               if ($previousTag) {
                   $compareUrl  = "https://github.com/$env:GITHUB_REPOSITORY/compare/$previousTag...$newTag"
                   $comparison  = gh api "repos/$env:GITHUB_REPOSITORY/compare/$previousTag...$newTag" | ConvertFrom-Json
-                  # Skip merge commits (2+ parents): they only repeat the commits they merge
-                  $commits = @($comparison.commits | Where-Object { $_.parents.Count -lt 2 } | ForEach-Object {
+                  # Skip merge commits (2+ parents, they only repeat the commits they merge) and the automatic changelog commits
+                  $commits = @($comparison.commits | Where-Object { $_.parents.Count -lt 2 -and $_.commit.message -notmatch '^docs: update changelog' } | ForEach-Object {
                       [pscustomobject]@{ sha = $_.sha; message = $_.commit.message.Split("`n")[0].Trim() }
                   })
                   $previousVersion = $previousTag.Substring("deployed/$envName/".Length)
@@ -304,7 +304,7 @@ jobs:
                   $commitLines     = @("_(no previous deployment tag found — this is the first tracked deployment)_")
               }
 
-              # Handed to Notify Teams; the card shows at most 10 commits
+              # Handed to Notify Teams through a job output: capped at 50 commits per environment to stay well below the size limits
               $deployments += [pscustomobject]@{
                   environment     = $envName
                   version         = $version
@@ -312,7 +312,7 @@ jobs:
                   previousVersion = $previousVersion
                   compareUrl      = $compareUrl
                   commitCount     = $commits.Count
-                  commits         = @($commits | Select-Object -First 10)
+                  commits         = @($commits | Select-Object -First 50)
               }
 
               $summary = @"

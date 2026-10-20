@@ -204,6 +204,8 @@ jobs:
     permissions:
       contents: write
       actions: read
+    outputs:
+      deployments: ${{ steps.tag.outputs.deployments }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -226,6 +228,7 @@ jobs:
           buildMode: ${{ steps.buildMode.outputs.buildMode }}
 
       - name: Tag deployments and post changelog
+        id: tag
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -242,11 +245,20 @@ jobs:
           }
 
           # Only tag environments whose Deploy matrix leg succeeded (others may have failed)
-          $environments = @(gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/jobs?per_page=100" --paginate `
-                  --jq '.jobs[] | select((.name | startswith("Deploy to ")) and .conclusion == "success") | .name' |
-              ForEach-Object { $_.Substring('Deploy to '.Length).Split(' ')[0] })
+          # The jobs API can lag behind the job results: when the Deploy matrix reports success, retry before giving up
+          $deployOk = '${{ needs.Deploy.result }}' -eq 'success'
+          for ($try = 1; $try -le 6; $try++) {
+              $environments = @(gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/jobs?per_page=100" --paginate `
+                      --jq '.jobs[] | select((.name | startswith("Deploy to ")) and .conclusion == "success") | .name' |
+                  ForEach-Object { $_.Substring('Deploy to '.Length).Split(' ')[0] })
+              if ($environments -or -not $deployOk) { break }
+              Write-Host "Deploy reported success but no successful Deploy job visible yet (attempt $try) — retrying in 10s."
+              Start-Sleep -Seconds 10
+          }
 
           if (-not $environments) {
+              # Fail loudly when Deploy succeeded, otherwise Notify Teams has no tags to report
+              if ($deployOk) { Write-Host "::error::Deploy succeeded but no successful Deploy job found — no deployment tags created."; exit 1 }
               Write-Host "::warning::No successful deployments — skipping deployment tags."
               exit 0
           }
@@ -254,40 +266,53 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          $deployments = @()
           foreach ($envName in $environments) {
               $newTag = "deployed/$envName/$version"
 
-              gh api "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$newTag" 2>$null | Out-Null
-              if ($LASTEXITCODE -eq 0) {
-                  Write-Host "Tag $newTag already exists — skipping."
-                  continue
-              }
+              # Existing tags of this environment, newest first; the previous deployment is the newest one that is not this tag
+              $existingTags = @(gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/deployed/$envName/" --paginate --jq '.[].ref' |
+                  ForEach-Object { $_ -replace '^refs/tags/', '' } |
+                  Sort-Object -Descending)
+              $previousTag = $existingTags | Where-Object { $_ -ne $newTag } | Select-Object -First 1
 
-              $previousTag = $null
-              $allTags = gh api "repos/$env:GITHUB_REPOSITORY/git/refs/tags/deployed/$envName/" 2>$null | ConvertFrom-Json
-              if ($allTags) {
-                  $previousTag = @($allTags) |
-                      Sort-Object { $_.ref } -Descending |
-                      Select-Object -First 1 |
-                      ForEach-Object { $_.ref -replace 'refs/tags/', '' }
+              if ($existingTags -contains $newTag) {
+                  Write-Host "Tag $newTag already exists — not recreating it."
               }
-
-              git tag $newTag
-              git push origin $newTag
-              Write-Host "Created tag: $newTag"
+              else {
+                  git tag $newTag
+                  git push origin $newTag
+                  if ($LASTEXITCODE -ne 0) { throw "Could not push tag $newTag" }
+                  Write-Host "Created tag: $newTag"
+              }
 
               if ($previousTag) {
                   $compareUrl  = "https://github.com/$env:GITHUB_REPOSITORY/compare/$previousTag...$newTag"
                   $comparison  = gh api "repos/$env:GITHUB_REPOSITORY/compare/$previousTag...$newTag" | ConvertFrom-Json
-                  $commitLines = $comparison.commits | ForEach-Object {
-                      "- ``$($_.sha.Substring(0,7))`` $($_.commit.message.Split("`n")[0])"
-                  }
+                  # Skip merge commits (2+ parents): they only repeat the commits they merge
+                  $commits = @($comparison.commits | Where-Object { $_.parents.Count -lt 2 } | ForEach-Object {
+                      [pscustomobject]@{ sha = $_.sha; message = $_.commit.message.Split("`n")[0].Trim() }
+                  })
+                  $previousVersion = $previousTag.Substring("deployed/$envName/".Length)
+                  $commitLines = @($commits | ForEach-Object { "- ``$($_.sha.Substring(0,7))`` $($_.message)" })
                   if (-not $commitLines) { $commitLines = @("_(no code changes between these versions)_") }
               }
               else {
-                  $compareUrl  = "https://github.com/$env:GITHUB_REPOSITORY/commits/$newTag"
-                  $commitLines = @("_(no previous deployment tag found — this is the first tracked deployment)_")
-                  $previousTag = "—"
+                  $compareUrl      = "https://github.com/$env:GITHUB_REPOSITORY/commits/$newTag"
+                  $commits         = @()
+                  $previousVersion = "First deployment"
+                  $commitLines     = @("_(no previous deployment tag found — this is the first tracked deployment)_")
+              }
+
+              # Handed to Notify Teams; the card shows at most 10 commits
+              $deployments += [pscustomobject]@{
+                  environment     = $envName
+                  version         = $version
+                  tag             = $newTag
+                  previousVersion = $previousVersion
+                  compareUrl      = $compareUrl
+                  commitCount     = $commits.Count
+                  commits         = @($commits | Select-Object -First 10)
               }
 
               $summary = @"
@@ -297,7 +322,7 @@ jobs:
           |---|---|
           | **Environment** | ``$envName`` |
           | **Version deployed** | ``$version`` |
-          | **Previous version** | ``$previousTag`` |
+          | **Previous version** | ``$previousVersion`` |
           | **Full diff** | [Compare on GitHub]($compareUrl) |
 
           ### Commits included in this deployment
@@ -306,6 +331,8 @@ jobs:
               $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
               Write-Host $summary
           }
+
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "deployments=$(ConvertTo-Json -InputObject $deployments -Compress -Depth 5)"
 
   CustomJobNotifyTeams:
     name: Notify Teams
@@ -317,6 +344,8 @@ jobs:
       checks: read
       deployments: read
     uses: ./.github/workflows/notify-teams-after-publish.yml
+    with:
+      deployments: ${{ needs.CustomJobTagDeployment.outputs.deployments }}
     secrets: inherit
 
   PostProcess:

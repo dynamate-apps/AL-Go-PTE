@@ -84,7 +84,6 @@ jobs:
 
             core.setOutput("failed_environments", JSON.stringify(failedEnvs));
             core.setOutput("deployments", JSON.stringify(deployments));
-            core.setOutput("version", deployments[0].version);
             core.setOutput("app_name", appName);
 
       - name: Post changelog to Teams
@@ -92,17 +91,19 @@ jobs:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           DEPLOYMENTS: ${{ steps.deployment.outputs.deployments }}
           FAILED_ENVIRONMENTS: ${{ steps.deployment.outputs.failed_environments }}
-          APP_VERSION: ${{ steps.deployment.outputs.version }}
           APP_NAME: ${{ steps.deployment.outputs.app_name }}
           RELEASED_BY: ${{ github.triggering_actor }}
           RELEASED_BY_URL: ${{ github.server_url }}/${{ github.triggering_actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # Create Adaptive Card payload using python
-          python3 - << 'PY' > /tmp/teams-payload.json
+          # One Adaptive Card per environment: a single card for many environments exceeds the 28 KB Teams message limit
+          rm -f /tmp/teams-card-*.json
+          python3 - << 'PY'
           import json, os, re
 
           repo_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+          run_url = os.environ['RUN_URL']
+          released_by = f"[{os.environ['RELEASED_BY']}]({os.environ['RELEASED_BY_URL']})"
 
           # Split a commit message into TextRuns, turning #123 into a link to PR 123
           def msg_runs(text):
@@ -114,227 +115,154 @@ jobs:
               elif part:
                 runs.append({"type": "TextRun", "text": part, "isSubtle": True})
             return runs
-          
-          changelogs = json.loads(os.environ['DEPLOYMENTS'])
-          failed_envs = json.loads(os.environ.get('FAILED_ENVIRONMENTS') or '[]')
 
-          # Build body sections for each environment
-          body_sections = [
-            {
-              "type": "TextBlock",
-              "text": "⚠️ Deployment Partially Failed" if failed_envs else "✅ Deployment Completed",
-              "weight": "Bolder",
-              "size": "Large",
-              "color": "Warning" if failed_envs else "Good"
-            },
-            {
-              "type": "FactSet",
-              "facts": [
-                {
-                  "title": "App:",
-                  "value": os.environ['APP_NAME']
-                },
-                {
-                  "title": "App Version:",
-                  "value": os.environ['APP_VERSION']
-                },
-                {
-                  "title": "Environments:",
-                  "value": ", ".join(c['environment'] for c in changelogs)
-                },
-                {
-                  "title": "Released by:",
-                  "value": f"[{os.environ['RELEASED_BY']}]({os.environ['RELEASED_BY_URL']})"
-                },
-                {
-                  "title": "Workflow run:",
-                  "value": f"[View workflow]({os.environ['RUN_URL']})"
-                }
-              ]
-            }
-          ]
-          if failed_envs:
-            body_sections[1]["facts"].insert(3, {"title": "Failed Environments:",
-                                                 "value": ", ".join(f["environment"] for f in failed_envs)})
+          def facts(*pairs):
+            return {"type": "FactSet", "facts": [{"title": t, "value": v} for t, v in pairs]}
 
-          # One block per failed environment: error message + link to the failing job
-          for failed in failed_envs:
-            body_sections += [
-              {
-                "type": "TextBlock",
-                "text": f"❌ Environment: {failed['environment']} (failed)",
-                "weight": "Bolder",
-                "size": "Medium",
-                "color": "Attention",
-                "separator": True
-              },
-              {
-                "type": "TextBlock",
-                "text": failed['error'],
-                "wrap": True,
-                "isSubtle": True,
-                "spacing": "Small"
-              },
-              {
-                "type": "TextBlock",
-                "text": f"[View failing job]({failed['url']})",
-                "spacing": "Small"
-              }
-            ]
+          # Coloured band at the top of the card (container style good = green, attention = red)
+          def header(text, subtitle, style):
+            return {"type": "Container", "style": style, "bleed": True, "items": [
+              {"type": "TextBlock", "text": text, "weight": "Bolder", "size": "Large", "wrap": True},
+              {"type": "TextBlock", "text": subtitle, "isSubtle": True, "spacing": "None", "wrap": True},
+            ]}
 
-          # Add details for each environment
-          for changelog in changelogs:
-            env_name = changelog['environment']
-            version = changelog['version']
-            prev_version = changelog['previousVersion']
-            commits = changelog['commits']
-            compare_url = changelog['compareUrl']
-            
-            # Add separator and environment header
-            body_sections.append({
-              "type": "TextBlock",
-              "text": f"Environment: {env_name}",
-              "weight": "Bolder",
-              "size": "Medium",
-              "separator": True
-            })
-            
-            # Add version info
-            body_sections.append({
-              "type": "FactSet",
-              "facts": [
-                {
-                  "title": "Current Version:",
-                  "value": version
-                },
-                {
-                  "title": "Previous Version:",
-                  "value": prev_version
-                }
-              ]
-            })
+          def link(title, url):
+            return {"type": "Action.OpenUrl", "title": title, "url": url}
 
-            if changelog.get('environmentUrl'):
-              body_sections.append({
-                "type": "ActionSet",
-                "actions": [{"type": "Action.OpenUrl", "title": "Open in Business Central",
-                             "url": changelog['environmentUrl']}]
-              })
-
-            # Add commits header
-            body_sections.append({
-              "type": "TextBlock",
-              "text": "Commits:",
-              "weight": "Bolder",
-              "spacing": "Medium",
-              "size": "Small"
-            })
-
-            # Add commits — one RichTextBlock per commit for proper inline link rendering
-            shown_commits = commits[:10]  # Limit to 10 to avoid payload size issues
-            for commit in shown_commits:
-              clean_msg = commit.get('message', '').replace('\n', ' ').replace('\r', '').strip()
-              if commit.get('sha'):
-                inlines = [
-                  {"type": "TextRun", "text": commit['sha'][:7],
-                   "selectAction": {"type": "Action.OpenUrl", "url": f"{repo_url}/commit/{commit['sha']}"},
-                   "color": "Accent", "isSubtle": False},
-                ] + msg_runs(f"  {clean_msg}")
-              else:
-                inlines = msg_runs(clean_msg)
-              body_sections.append({
-                "type": "RichTextBlock",
-                "inlines": inlines,
-                "spacing": "Small"
-              })
-
-            if changelog['commitCount'] > 10:
-              body_sections.append({
-                "type": "TextBlock",
-                "text": f"... and {changelog['commitCount'] - 10} more commits",
-                "wrap": True,
-                "isSubtle": True,
-                "spacing": "Small"
-              })
-
-            if not shown_commits:
-              body_sections.append({
-                "type": "TextBlock",
-                "text": "Initial deployment - no previous version to compare" if prev_version == "First deployment" else "No commits found",
-                "wrap": True,
-                "isSubtle": True,
-                "spacing": "Small"
-              })
-          
-          payload = {
-            "type": "message",
-            "attachments": [
-              {
+          # Schema 1.5 is the highest version Teams renders everywhere and everything below needs; msteams.width makes the card full width
+          def card(body, actions, fallback):
+            return {
+              "type": "message",
+              "attachments": [{
                 "contentType": "application/vnd.microsoft.card.adaptive",
                 "content": {
                   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                   "type": "AdaptiveCard",
-                  "version": "1.4",
-                  "body": body_sections,
-                  "actions": [
-                    {
-                      "type": "Action.OpenUrl",
-                      "title": "View Workflow Run",
-                      "url": os.environ['RUN_URL']
-                    }
-                  ]
+                  "version": "1.5",
+                  "fallbackText": fallback,
+                  "speak": fallback,
+                  "msteams": {"width": "Full"},
+                  "body": body,
+                  "actions": actions
                 }
-              }
+              }]
+            }
+
+          cards = []
+
+          def deployment_card(d, max_commits):
+            env = d['environment']
+            prev_version = d['previousVersion']
+            body = [
+              header(f"✅ Deployed to {env}", os.environ['APP_NAME'], "good"),
+              facts(("Version:", d['version']),
+                    ("Previous version:", prev_version),
+                    ("Commits:", str(d['commitCount'])),
+                    ("Released by:", released_by)),
             ]
-          }
-          print(json.dumps(payload))
+
+            # One RichTextBlock per commit for proper inline link rendering
+            shown = d['commits'][:max_commits]
+            items = [{"type": "TextBlock", "text": "Changes", "weight": "Bolder"}]
+            for commit in shown:
+              clean_msg = commit.get('message', '').replace(chr(10), ' ').replace(chr(13), '').strip()
+              inlines = [
+                {"type": "TextRun", "text": commit['sha'][:7],
+                 "selectAction": {"type": "Action.OpenUrl", "url": f"{repo_url}/commit/{commit['sha']}"},
+                 "color": "Accent", "isSubtle": False},
+              ] + msg_runs(f"  {clean_msg}")
+              items.append({"type": "RichTextBlock", "inlines": inlines, "spacing": "Small"})
+
+            more = d['commitCount'] - len(shown)
+            if more > 0:
+              note = f"... and {more} more commits"
+            elif d['commitCount'] == 0:
+              note = "Initial deployment - no previous version to compare" if prev_version == "First deployment" else "No commits found"
+            else:
+              note = None
+            if note:
+              items.append({"type": "TextBlock", "text": note, "wrap": True, "isSubtle": True, "spacing": "Small"})
+            body.append({"type": "Container", "style": "emphasis", "spacing": "Medium", "items": items})
+
+            actions = []
+            if d.get('environmentUrl'):
+              actions.append(link("Open in Business Central", d['environmentUrl']))
+            actions += [link("Full diff", d['compareUrl']), link("Workflow run", run_url)]
+            return card(body, actions, f"Deployed {d['version']} to {env}")
+
+          for d in json.loads(os.environ['DEPLOYMENTS']):
+            # Show every commit, unless the card would get close to the 28 KB Teams message limit
+            shown = len(d['commits'])
+            c = deployment_card(d, shown)
+            while len(json.dumps(c).encode()) > 24000 and shown > 0:
+              shown = shown * 3 // 4
+              c = deployment_card(d, shown)
+            cards.append(c)
+
+          # One card per failed environment: error message + link to the failing job
+          for failed in json.loads(os.environ.get('FAILED_ENVIRONMENTS') or '[]'):
+            env = failed['environment']
+            cards.append(card([
+              header(f"❌ Deployment to {env} failed", os.environ['APP_NAME'], "attention"),
+              facts(("Released by:", released_by)),
+              {"type": "Container", "style": "emphasis", "spacing": "Medium", "items": [
+                {"type": "TextBlock", "text": failed['error'], "wrap": True},
+              ]},
+            ], [link("View failing job", failed['url']), link("Workflow run", run_url)], f"Deployment to {env} failed"))
+
+          for i, c in enumerate(cards):
+            with open(f"/tmp/teams-card-{i:02d}.json", "w", encoding="utf-8") as f:
+              json.dump(c, f)
           PY
 
-          echo "::group::Teams Webhook Details"
-          echo "Endpoint: $TEAMS_WEBHOOK_URL"
-          echo "Method: POST"
-          echo "Content-Type: application/json"
-          echo "::endgroup::"
-
-          echo "::group::JSON Payload"
-          cat /tmp/teams-payload.json
-          echo ""
-          echo "::endgroup::"
-
-          echo "::group::Sending to Teams..."
-          # Send to Teams and capture response
-          CURL_EXIT=0
-          HTTP_CODE=$(curl -w "%{http_code}" -o /tmp/teams-response.txt \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d @/tmp/teams-payload.json \
-            "$TEAMS_WEBHOOK_URL" 2>/tmp/teams-error.txt) || CURL_EXIT=$?
-          
-          if [ "$CURL_EXIT" -ne 0 ]; then
-            echo "::error::❌ curl command failed with exit code ${CURL_EXIT}"
-            if [ -s /tmp/teams-error.txt ]; then
-              echo "Error details:"
-              cat /tmp/teams-error.txt
+          FAILED=0
+          SENT=0
+          for CARD in /tmp/teams-card-*.json; do
+            BYTES=$(wc -c < "$CARD")
+            echo "::group::Posting $(basename "$CARD") (${BYTES} bytes)"
+            # Teams limits a message to 28 KB
+            if [ "$BYTES" -gt 28000 ]; then
+              echo "::warning::$(basename "$CARD") is ${BYTES} bytes, over the 28 KB Teams message limit; Teams may drop it"
             fi
-            exit 1
-          fi
-          
-          # Validate HTTP_CODE is non-empty and numeric
-          if [ -z "$HTTP_CODE" ] || ! [[ "$HTTP_CODE" =~ ^[0-9]+$ ]]; then
-            echo "::error::❌ Invalid HTTP status code: '${HTTP_CODE:-empty}'"
-            exit 1
-          fi
-          
-          echo "HTTP Status Code: $HTTP_CODE"
-          echo "Response Body:"
-          cat /tmp/teams-response.txt
-          echo ""
-          echo "::endgroup::"
+            cat "$CARD"
+            echo ""
 
-          # Check if the request was successful
-          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "✅ Successfully posted to Teams (HTTP $HTTP_CODE)"
-          else
-            echo "::error::❌ Failed to post to Teams (HTTP $HTTP_CODE)"
+            # Teams throttles a webhook at 4 requests per second: pause between cards, retry on HTTP 429
+            if [ "$SENT" -gt 0 ]; then sleep 2; fi
+            SENT=$((SENT + 1))
+
+            CURL_EXIT=0
+            for ATTEMPT in 1 2 3; do
+              HTTP_CODE=$(curl -sS -w "%{http_code}" -o /tmp/teams-response.txt \
+                -X POST \
+                -H "Content-Type: application/json" \
+                -d @"$CARD" \
+                "$TEAMS_WEBHOOK_URL" 2>/tmp/teams-error.txt) || CURL_EXIT=$?
+              if [ "$CURL_EXIT" -ne 0 ] || [ "$HTTP_CODE" != "429" ]; then break; fi
+              echo "HTTP 429, retrying in 10s (attempt ${ATTEMPT})"
+              sleep 10
+            done
+
+            if [ "$CURL_EXIT" -ne 0 ]; then
+              echo "::error::curl failed with exit code ${CURL_EXIT} for $(basename "$CARD")"
+              cat /tmp/teams-error.txt
+              FAILED=$((FAILED + 1))
+            else
+              echo "HTTP Status Code: $HTTP_CODE"
+              echo "Response Body:"
+              cat /tmp/teams-response.txt
+              echo ""
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+                echo "Posted $(basename "$CARD") to Teams (HTTP $HTTP_CODE)"
+              else
+                echo "::error::Failed to post $(basename "$CARD") to Teams (HTTP $HTTP_CODE)"
+                FAILED=$((FAILED + 1))
+              fi
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::${FAILED} of ${SENT} Teams cards could not be posted"
             exit 1
           fi

@@ -116,13 +116,21 @@ jobs:
                 runs.append({"type": "TextRun", "text": part, "isSubtle": True})
             return runs
 
-          def title(text, color):
-            return {"type": "TextBlock", "text": text, "weight": "Bolder", "size": "Large", "color": color, "wrap": True}
-
           def facts(*pairs):
             return {"type": "FactSet", "facts": [{"title": t, "value": v} for t, v in pairs]}
 
-          def card(body):
+          # Coloured band at the top of the card (container style good = green, attention = red)
+          def header(text, subtitle, style):
+            return {"type": "Container", "style": style, "bleed": True, "items": [
+              {"type": "TextBlock", "text": text, "weight": "Bolder", "size": "Large", "wrap": True},
+              {"type": "TextBlock", "text": subtitle, "isSubtle": True, "spacing": "None", "wrap": True},
+            ]}
+
+          def link(title, url):
+            return {"type": "Action.OpenUrl", "title": title, "url": url}
+
+          # Schema 1.5 is the highest version Teams renders everywhere and everything below needs; msteams.width makes the card full width
+          def card(body, actions, fallback):
             return {
               "type": "message",
               "attachments": [{
@@ -130,9 +138,12 @@ jobs:
                 "content": {
                   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                   "type": "AdaptiveCard",
-                  "version": "1.4",
+                  "version": "1.5",
+                  "fallbackText": fallback,
+                  "speak": fallback,
+                  "msteams": {"width": "Full"},
                   "body": body,
-                  "actions": [{"type": "Action.OpenUrl", "title": "View Workflow Run", "url": run_url}]
+                  "actions": actions
                 }
               }]
             }
@@ -140,21 +151,19 @@ jobs:
           cards = []
 
           def deployment_card(d, max_commits):
+            env = d['environment']
             prev_version = d['previousVersion']
             body = [
-              title(f"✅ Deployed to {d['environment']}", "Good"),
-              facts(("App:", os.environ['APP_NAME']),
-                    ("Version:", d['version']),
-                    ("Previous Version:", prev_version),
+              header(f"✅ Deployed to {env}", os.environ['APP_NAME'], "good"),
+              facts(("Version:", d['version']),
+                    ("Previous version:", prev_version),
+                    ("Commits:", str(d['commitCount'])),
                     ("Released by:", released_by)),
             ]
-            if d.get('environmentUrl'):
-              body.append({"type": "ActionSet", "actions": [{"type": "Action.OpenUrl", "title": "Open in Business Central",
-                                                              "url": d['environmentUrl']}]})
-            body.append({"type": "TextBlock", "text": "Commits:", "weight": "Bolder", "spacing": "Medium", "size": "Small"})
 
             # One RichTextBlock per commit for proper inline link rendering
             shown = d['commits'][:max_commits]
+            items = [{"type": "TextBlock", "text": "Changes", "weight": "Bolder"}]
             for commit in shown:
               clean_msg = commit.get('message', '').replace(chr(10), ' ').replace(chr(13), '').strip()
               inlines = [
@@ -162,7 +171,7 @@ jobs:
                  "selectAction": {"type": "Action.OpenUrl", "url": f"{repo_url}/commit/{commit['sha']}"},
                  "color": "Accent", "isSubtle": False},
               ] + msg_runs(f"  {clean_msg}")
-              body.append({"type": "RichTextBlock", "inlines": inlines, "spacing": "Small"})
+              items.append({"type": "RichTextBlock", "inlines": inlines, "spacing": "Small"})
 
             more = d['commitCount'] - len(shown)
             if more > 0:
@@ -172,9 +181,14 @@ jobs:
             else:
               note = None
             if note:
-              body.append({"type": "TextBlock", "text": note, "wrap": True, "isSubtle": True, "spacing": "Small"})
-            body.append({"type": "TextBlock", "text": f"[Full diff on GitHub]({d['compareUrl']})", "spacing": "Small"})
-            return card(body)
+              items.append({"type": "TextBlock", "text": note, "wrap": True, "isSubtle": True, "spacing": "Small"})
+            body.append({"type": "Container", "style": "emphasis", "spacing": "Medium", "items": items})
+
+            actions = []
+            if d.get('environmentUrl'):
+              actions.append(link("Open in Business Central", d['environmentUrl']))
+            actions += [link("Full diff", d['compareUrl']), link("Workflow run", run_url)]
+            return card(body, actions, f"Deployed {d['version']} to {env}")
 
           for d in json.loads(os.environ['DEPLOYMENTS']):
             # Show every commit, unless the card would get close to the 28 KB Teams message limit
@@ -187,12 +201,14 @@ jobs:
 
           # One card per failed environment: error message + link to the failing job
           for failed in json.loads(os.environ.get('FAILED_ENVIRONMENTS') or '[]'):
+            env = failed['environment']
             cards.append(card([
-              title(f"❌ Deployment to {failed['environment']} failed", "Attention"),
-              facts(("App:", os.environ['APP_NAME']), ("Released by:", released_by)),
-              {"type": "TextBlock", "text": failed['error'], "wrap": True, "isSubtle": True, "spacing": "Small"},
-              {"type": "TextBlock", "text": f"[View failing job]({failed['url']})", "spacing": "Small"},
-            ]))
+              header(f"❌ Deployment to {env} failed", os.environ['APP_NAME'], "attention"),
+              facts(("Released by:", released_by)),
+              {"type": "Container", "style": "emphasis", "spacing": "Medium", "items": [
+                {"type": "TextBlock", "text": failed['error'], "wrap": True},
+              ]},
+            ], [link("View failing job", failed['url']), link("Workflow run", run_url)], f"Deployment to {env} failed"))
 
           for i, c in enumerate(cards):
             with open(f"/tmp/teams-card-{i:02d}.json", "w", encoding="utf-8") as f:

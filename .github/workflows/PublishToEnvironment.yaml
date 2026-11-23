@@ -187,6 +187,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history, tags and branches: needed to find the PRs in a deployment and their changelog entries
+          fetch-depth: 0
 
       - name: Determine Build Mode
         id: buildMode
@@ -244,6 +247,65 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # CHANGELOG.md contains non-ASCII characters: read git output as UTF-8
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+          # Changelog entries of a ref, by PR number: "- summary (#123) [sha, sha]" below a "### Category" heading
+          function Get-ChangelogEntries([string]$ref) {
+              $entries = @{}
+              git cat-file -e "${ref}:CHANGELOG.md" 2>$null
+              if ($LASTEXITCODE -ne 0) { return $entries }
+              $category = 'Other changes'
+              foreach ($line in (git show "${ref}:CHANGELOG.md")) {
+                  if ($line -match '^###\s+(.+?)\s*$') { $category = $Matches[1] }
+                  elseif ($line -match '^- (.+?) \(#(\d+)\)(?: \[[^\]]*\])?\s*$') {
+                      $pr = [int]$Matches[2]
+                      if (-not $entries.ContainsKey($pr)) { $entries[$pr] = [pscustomobject]@{ category = $category; summary = $Matches[1] } }
+                  }
+              }
+              return $entries
+          }
+
+          # The changes in a deployment: one item per PR merged into the branch, with its changelog entry.
+          # Matched on PR number because the commit lists in CHANGELOG.md can contain commits of other PRs.
+          # Without an entry (changelog not generated yet, or a direct commit) the PR title or commit message is used.
+          function Get-DeploymentChanges([string]$from, [string]$to, [hashtable]$changelog) {
+              $categoryOrder = @('Breaking Changes', 'Features', 'Fixes', 'Improvements', 'Removed', 'Dependencies', 'Technical', 'Other changes')
+              $changes = foreach ($sha in @(git rev-list --first-parent "$from..$to")) {
+                  $subject = git log -1 --format=%s $sha
+                  if ($subject -match '^docs: update changelog' -or $subject -match '^Merge pull request #\d+ from \S+/changelog/') { continue }
+
+                  $pr = $null
+                  $title = $subject
+                  if ($subject -match '^Merge pull request #(\d+)\b') {
+                      $pr = [int]$Matches[1]
+                      $prTitle = @(git log -1 --format=%b $sha) | Where-Object { $_.Trim() } | Select-Object -First 1
+                      if ($prTitle) { $title = $prTitle.Trim() }
+                  }
+                  elseif ($subject -match '^(.*?)\s*\(#(\d+)\)\s*$') {
+                      $title = $Matches[1]
+                      $pr = [int]$Matches[2]
+                  }
+
+                  $entry = $null
+                  if ($pr) {
+                      $entry = $changelog[$pr]
+                      # Changelog PRs that are not merged yet still hold the entry on their own branch
+                      if (-not $entry) { $entry = (Get-ChangelogEntries "origin/changelog/pr-$pr")[$pr] }
+                  }
+
+                  [pscustomobject]@{
+                      category = if ($entry) { $entry.category } else { 'Other changes' }
+                      summary  = if ($entry) { $entry.summary } else { $title }
+                      pr       = $pr
+                      sha      = $sha
+                  }
+              }
+              return @($changes | Sort-Object -Stable { $i = [array]::IndexOf($categoryOrder, $_.category); if ($i -lt 0) { $categoryOrder.Count } else { $i } })
+          }
+
+          $changelog = Get-ChangelogEntries "origin/$env:GITHUB_REF_NAME"
+
           $deployments = @()
           foreach ($envName in $environments) {
               $newTag = "deployed/$envName/$version"
@@ -272,17 +334,22 @@ jobs:
                       [pscustomobject]@{ sha = $_.sha; message = $_.commit.message.Split("`n")[0].Trim() }
                   })
                   $previousVersion = $previousTag.Substring("deployed/$envName/".Length)
-                  $commitLines = @($commits | ForEach-Object { "- ``$($_.sha.Substring(0,7))`` $($_.message)" })
-                  if (-not $commitLines) { $commitLines = @("_(no code changes between these versions)_") }
+                  $changes = @(Get-DeploymentChanges $previousTag $newTag $changelog)
+                  $changeLines = @($changes | ForEach-Object {
+                      $reference = if ($_.pr) { "(#$($_.pr))" } else { "(``$($_.sha.Substring(0,7))``)" }
+                      "- **$($_.category):** $($_.summary) $reference"
+                  })
+                  if (-not $changeLines) { $changeLines = @("_(no code changes between these versions)_") }
               }
               else {
                   $compareUrl      = "https://github.com/$env:GITHUB_REPOSITORY/commits/$newTag"
                   $commits         = @()
+                  $changes         = @()
                   $previousVersion = "First deployment"
-                  $commitLines     = @("_(no previous deployment tag found — this is the first tracked deployment)_")
+                  $changeLines     = @("_(no previous deployment tag found — this is the first tracked deployment)_")
               }
 
-              # Handed to Notify Teams through a job output: capped at 50 commits per environment to stay well below the size limits
+              # Handed to Notify Teams through a job output: capped at 50 changes per environment to stay well below the size limits
               $deployments += [pscustomobject]@{
                   environment     = $envName
                   version         = $version
@@ -290,7 +357,8 @@ jobs:
                   previousVersion = $previousVersion
                   compareUrl      = $compareUrl
                   commitCount     = $commits.Count
-                  commits         = @($commits | Select-Object -First 50)
+                  changeCount     = $changes.Count
+                  changes         = @($changes | Select-Object -First 50)
               }
 
               $summary = @"
@@ -303,14 +371,17 @@ jobs:
           | **Previous version** | ``$previousVersion`` |
           | **Full diff** | [Compare on GitHub]($compareUrl) |
 
-          ### Commits included in this deployment
-          $($commitLines -join "`n")
+          ### Changes included in this deployment
+          $($changeLines -join "`n")
           "@
               $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
               Write-Host $summary
           }
 
           Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "deployments=$(ConvertTo-Json -InputObject $deployments -Compress -Depth 5)"
+
+          # A missing changelog branch leaves a non-zero exit code, which must not fail this step
+          $global:LASTEXITCODE = 0
 
   CustomJobNotifyTeams:
     name: Notify Teams
